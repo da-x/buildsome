@@ -164,12 +164,20 @@ static bool try_chop_common_root(unsigned prefix_length, char *prefix, char *can
 #define OUT_EFFECT_IF_NOT_ERROR(err_val, effect)        \
             ((err_val) == result) ? OUT_EFFECT_NOTHING : (effect)
 
+static bool filter_path(const char *path)
+{
+    return strncmp(path, "/tmp", 4) == 0;
+}
+
 DEFINE_WRAPPER(int, creat, (const char *path, mode_t mode))
 {
     initialize_process_state();
     bool needs_await = false;
     DEFINE_MSG(msg, creat);
     OUT_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.out_path)) {
+        return SILENT_CALL_REAL(creat, path, mode);
+    }
     msg.args.mode = mode;
 
     return CALL_WITH_OUTPUTS(
@@ -191,6 +199,9 @@ DEFINE_WRAPPER(int, name, (int vers, const char *path, struct stat_struct *buf))
     bool needs_await = false;                                           \
     DEFINE_MSG(msg, msg_type);                                          \
     IN_PATH_COPY(needs_await, msg.args.path, path);                     \
+    if (filter_path(msg.args.path.in_path)) {                           \
+        return SILENT_CALL_REAL(name, vers, path, buf);                 \
+    }                                                                   \
     return AWAIT_CALL_REAL(needs_await, msg, name, vers, path, buf);    \
 }
 
@@ -206,6 +217,9 @@ DEFINE_WRAPPER(DIR *, opendir, (const char *path))
     bool needs_await = false;
     DEFINE_MSG(msg, opendir);
     IN_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.in_path)) {
+        return SILENT_CALL_REAL(opendir, path);
+    }
     return AWAIT_CALL_REAL(needs_await, msg, opendir, path);
 }
 
@@ -216,6 +230,9 @@ DEFINE_WRAPPER(int, access, (const char *path, int mode))
     bool needs_await = false;
     DEFINE_MSG(msg, access);
     IN_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.in_path)) {
+        return SILENT_CALL_REAL(access, path, mode);
+    }
     msg.args.mode = mode;
     return AWAIT_CALL_REAL(needs_await, msg, access, path, mode);
 }
@@ -228,6 +245,9 @@ DEFINE_WRAPPER(int, truncate, (const char *path, off_t length))
     DEFINE_MSG(msg, truncate);
     msg.args.length = length;
     OUT_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.out_path)) {
+        return SILENT_CALL_REAL(truncate, path, length);
+    }
     return CALL_WITH_OUTPUTS(
         msg, needs_await,
         int, (truncate, path, length),
@@ -244,6 +264,9 @@ DEFINE_WRAPPER(ssize_t, readlink, (const char *path, char *buf, size_t bufsiz))
     bool needs_await = false;
     DEFINE_MSG(msg, readlink);
     IN_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.in_path)) {
+        return SILENT_CALL_REAL(readlink, path, buf, bufsiz);
+    }
     return AWAIT_CALL_REAL(needs_await, msg, readlink, path, buf, bufsiz);
 }
 
@@ -285,6 +308,9 @@ DEFINE_WRAPPER(int, unlink, (const char *path))
     DEFINE_MSG(msg, unlink);
     msg.args.flags = 0;
     OUT_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.out_path)) {
+        return SILENT_CALL_REAL(unlink, path);
+    }
     return CALL_WITH_OUTPUTS(
         msg, needs_await,
         int, (unlink, path),
@@ -308,6 +334,9 @@ DEFINE_WRAPPER(int, unlinkat, (int dirfd, const char *path, int flags))
     DEFINE_MSG(msg, unlink);
     msg.args.flags = flags;
     OUT_PATH_COPY(needs_await, msg.args.path, pathptr);
+    if (filter_path(msg.args.path.out_path)) {
+        return SILENT_CALL_REAL(unlinkat, dirfd, path, flags);
+    }
     return CALL_WITH_OUTPUTS(
         msg, needs_await,
         int, (unlinkat, dirfd, path, flags),
@@ -324,6 +353,10 @@ DEFINE_WRAPPER(int, rename, (const char *oldpath, const char *newpath))
     DEFINE_MSG(msg, rename);
     OUT_PATH_COPY(needs_await, msg.args.oldpath, oldpath);
     OUT_PATH_COPY(needs_await, msg.args.newpath, newpath);
+    if (filter_path(msg.args.oldpath.out_path) &&
+        filter_path(msg.args.newpath.out_path)) {
+        return SILENT_CALL_REAL(rename, oldpath, newpath);
+    }
     return CALL_WITH_OUTPUTS(
         msg, needs_await,
         int, (rename, oldpath, newpath),
@@ -341,6 +374,9 @@ DEFINE_WRAPPER(int, chmod, (const char *path, mode_t mode))
     bool needs_await = false;
     DEFINE_MSG(msg, chmod);
     OUT_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.out_path)) {
+        return SILENT_CALL_REAL(chmod, path, mode);
+    }
     msg.args.mode = mode;
     return CALL_WITH_OUTPUTS(
         msg, needs_await,
@@ -357,6 +393,9 @@ DEFINE_WRAPPER(int, mknod, (const char *path, mode_t mode, dev_t dev))
     bool needs_await = false;
     DEFINE_MSG(msg, mknod);
     OUT_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.out_path)) {
+        return SILENT_CALL_REAL(mknod, path, mode, dev);
+    }
     msg.args.mode = mode;
     msg.args.dev = dev;
     return CALL_WITH_OUTPUTS(
@@ -374,6 +413,9 @@ DEFINE_WRAPPER(int, mkdir, (const char *path, mode_t mode))
     bool needs_await = false;
     DEFINE_MSG(msg, mkdir);
     OUT_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.out_path)) {
+        return SILENT_CALL_REAL(mkdir, path, mode);
+    }
     msg.args.mode = mode;
     return CALL_WITH_OUTPUTS(
         msg, needs_await,
@@ -390,6 +432,9 @@ DEFINE_WRAPPER(int, rmdir, (const char *path))
     bool needs_await = false;
     DEFINE_MSG(msg, rmdir);
     OUT_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.out_path)) {
+        return SILENT_CALL_REAL(rmdir, path);
+    }
     return CALL_WITH_OUTPUTS(
         msg, needs_await,
         int, (rmdir, path),
@@ -409,6 +454,12 @@ DEFINE_WRAPPER(int, symlink, (const char *target, const char *linkpath))
     DEFINE_MSG(msg, symlink);
     IN_PATH_COPY(needs_await, msg.args.target, target);
     OUT_PATH_COPY(needs_await, msg.args.linkpath, linkpath);
+
+    if (filter_path(msg.args.target.in_path) &&
+        filter_path(msg.args.linkpath.out_path)) {
+        return symlink(target, linkpath);
+    }
+
     return CALL_WITH_OUTPUTS(
         msg, needs_await,
         int, (symlink, target, linkpath),
@@ -424,6 +475,10 @@ DEFINE_WRAPPER(int, link, (const char *oldpath, const char *newpath))
     DEFINE_MSG(msg, link);
     OUT_PATH_COPY(needs_await, msg.args.oldpath, oldpath);
     OUT_PATH_COPY(needs_await, msg.args.newpath, newpath);
+    if (filter_path(msg.args.oldpath.out_path) &&
+        filter_path(msg.args.newpath.out_path)) {
+        return SILENT_CALL_REAL(link, oldpath, newpath);
+    }
     return CALL_WITH_OUTPUTS(
         msg, needs_await,
         int, (link, oldpath, newpath),
@@ -440,6 +495,9 @@ DEFINE_WRAPPER(int, chown, (const char *path, uid_t owner, gid_t group))
     bool needs_await = false;
     DEFINE_MSG(msg, chown);
     OUT_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.out_path)) {
+        return SILENT_CALL_REAL(chown, path, owner, group);
+    }
     msg.args.owner = owner;
     msg.args.group = group;
     return CALL_WITH_OUTPUTS(
@@ -633,6 +691,9 @@ DEFINE_WRAPPER(int, execve, (const char *filename, char *const argv[], char *con
             bool needs_await = false;                                   \
             DEFINE_MSG(msg, openr);                                     \
             IN_PATH_COPY(needs_await, msg.args.path, _path);            \
+            if (filter_path(msg.args.path.in_path)) {                   \
+                return SILENT_CALL_REAL(_name, _path, _flags);          \
+            }                                                           \
             return AWAIT_CALL_REAL(                                     \
                 needs_await, msg, _name, _path, _flags);                \
         }                                                               \
@@ -642,6 +703,9 @@ DEFINE_WRAPPER(int, execve, (const char *filename, char *const argv[], char *con
             bool needs_await = false;                                   \
             DEFINE_MSG(msg, openw);                                     \
             OUT_PATH_COPY(needs_await, msg.args.path, _path);           \
+            if (filter_path(msg.args.path.out_path)) {                  \
+                return SILENT_CALL_REAL(_name, _path, _flags, mode);    \
+            }                                                           \
             if(is_also_read) msg.args.flags |= FLAG_ALSO_READ;          \
             if(is_create)    msg.args.flags |= FLAG_CREATE;             \
             if(is_truncate)  msg.args.flags |= FLAG_TRUNCATE;           \
@@ -747,12 +811,18 @@ struct fopen_mode_bools fopen_parse_modestr(const char *modestr)
             bool needs_await = false;                                   \
             DEFINE_MSG(msg, openr);                                     \
             IN_PATH_COPY(needs_await, msg.args.path, path);             \
+            if (filter_path(msg.args.path.in_path)) {                   \
+                return SILENT_CALL_REAL(name, path, modestr, ##__VA_ARGS__); \
+            }                                                           \
             return AWAIT_CALL_REAL(                                     \
                 needs_await, msg, name, path, modestr, ##__VA_ARGS__);  \
         }                                                               \
         bool needs_await = false;                                       \
         DEFINE_MSG(msg, openw);                                         \
         OUT_PATH_COPY(needs_await, msg.args.path, path);                \
+        if (filter_path(msg.args.path.out_path)) {                      \
+            return SILENT_CALL_REAL(name, path, modestr, ##__VA_ARGS__); \
+        }                                                               \
         if(mode.is_read)     msg.args.flags |= FLAG_ALSO_READ;          \
         if(mode.is_create)   msg.args.flags |= FLAG_CREATE;             \
         if(mode.is_truncate) msg.args.flags |= FLAG_TRUNCATE;           \
@@ -809,6 +879,9 @@ DEFINE_WRAPPER(void *, dlopen, (const char *filename, int flag))
     bool needs_await = false;
     DEFINE_MSG(msg, openr);
     IN_PATH_COPY(needs_await, msg.args.path, filename);
+    if (filter_path(msg.args.path.in_path)) {
+        return SILENT_CALL_REAL(dlopen, filename, flag);
+    }
     /* TODO: dlopen does a lot of searching/etc if the pathname does
      * not contain slash, need to handle it correctly (or switch to
      * fuse!) */
@@ -821,6 +894,9 @@ DEFINE_WRAPPER(char *, realpath, (const char *path, char *resolved_path))
     bool needs_await = false;
     DEFINE_MSG(msg, realpath);
     IN_PATH_COPY(needs_await, msg.args.path, path);
+    if (filter_path(msg.args.path.in_path)) {
+        return SILENT_CALL_REAL(realpath, path, resolved_path);
+    }
     return AWAIT_CALL_REAL(needs_await, msg, realpath, path, resolved_path);
 }
 
