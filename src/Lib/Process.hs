@@ -14,6 +14,7 @@ import System.IO (Handle, hClose)
 import System.Process
 import qualified Data.ByteString.Char8 as BS
 import qualified Lib.Timeout as Timeout
+import Control.Applicative
 
 type Env = [(String, String)]
 
