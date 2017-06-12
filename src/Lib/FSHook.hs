@@ -16,10 +16,11 @@ module Lib.FSHook
   , runCommand, timedRunCommand
   ) where
 
-import           Control.Concurrent (ThreadId, myThreadId, killThread)
+import           Control.Concurrent (ThreadId, myThreadId, killThread,
+                                     threadWaitRead)
 import           Control.Concurrent.MVar
 import qualified Control.Exception as E
-import           Control.Monad (forever, void, unless, (<=<))
+import           Control.Monad (forever, void, unless, (<=<), forM_)
 import           Data.Binary (Binary(..))
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BS8
@@ -49,7 +50,7 @@ import           Lib.IORef (atomicModifyIORef'_, atomicModifyIORef_)
 import           Lib.Printer (Printer)
 import qualified Lib.Printer as Printer
 import qualified Lib.Process as Process
-import           Lib.SharedMemory (SharedMemory)
+import           Lib.SharedMemory (SharedMemory, RCSharedMemory)
 import qualified Lib.SharedMemory as SharedMemory
 import           Lib.Sock (recvFrame, recvLoop_, withUnixStreamListener)
 import           Lib.StdOutputs (StdOutputs(..))
@@ -63,7 +64,7 @@ import           System.Exit (ExitCode)
 import           System.IO (hPutStrLn, stderr)
 import qualified System.Posix.ByteString as Posix
 import           System.Process (CmdSpec)
-
+import           System.Posix.Types (Fd(Fd))
 import           Prelude.Compat hiding (FilePath)
 
 data AccessDoc
@@ -205,8 +206,8 @@ sendGo :: Socket -> IO ()
 sendGo conn = void $ SockBS.send conn (BS8.pack "GO")
 
 {-# INLINE handleJobMsg #-}
-handleJobMsg :: String -> Socket -> RunningJob -> Protocol.Msg -> IO ()
-handleJobMsg _tidStr conn job (Protocol.Msg isDelayed func) =
+handleJobMsg :: Maybe RCSharedMemory -> String -> Socket -> RunningJob -> Protocol.Msg -> IO ()
+handleJobMsg mRoShmem tidStr conn job (Protocol.Msg isDelayed func) =
   case func of
     -- TODO: If any of these outputs are NOT also mode-only inputs on
     -- their file paths, don't use handleOutputs so that we don't
@@ -257,7 +258,7 @@ handleJobMsg _tidStr conn job (Protocol.Msg isDelayed func) =
     handlers = jobFSAccessHandlers job
     handleDelayed   inputs outputs = wrap $ delayedFSAccessHandler handlers actDesc inputs outputs
     handleUndelayed inputs outputs = wrap $ undelayedFSAccessHandler handlers actDesc inputs outputs
-    wrap = wrapHandler job conn isDelayed
+    wrap = wrapHandler mRoShmem tidStr job conn isDelayed
     actDesc = AccessDocEmpty -- TODO: AccessDoc func $ jobLabel job
     handleInput accessType path = handleInputs [Input accessType path]
     handleInputs inputs =
@@ -276,14 +277,20 @@ handleJobMsg _tidStr conn job (Protocol.Msg isDelayed func) =
       where
         allInputs = inputs ++ map inputOfOutputPair outputPairs
 
-wrapHandler :: RunningJob -> Socket -> IsDelayed -> IO () -> IO ()
-wrapHandler job conn isDelayed handler =
+wrapHandler :: Maybe RCSharedMemory -> String -> RunningJob -> Socket -> IsDelayed -> IO () -> IO ()
+wrapHandler mRoSharedMemory tidStr job conn isDelayed handler =
   forwardExceptions $ do
     handler
     -- Intentionally avoid sendGo if jobFSAccessHandler failed. It
     -- means we disallow the effect.
     case isDelayed of
-      Delayed -> sendGo conn
+      Delayed ->
+        do case mRoSharedMemory of
+             Nothing ->
+               E.throwIO $ ProtocolError "Unexpected delayed job"
+             Just roShmem -> do
+               takeRoShmemBlobs roShmem tidStr conn job
+               sendGo conn
       NotDelayed -> return ()
   where
     forwardExceptions =
@@ -297,6 +304,13 @@ withRegistered registry key val =
     register = atomicModifyIORef_ registry $ M.insert key val
     unregister = atomicModifyIORef_ registry $ M.delete key
 
+takeRoShmemBlobs :: RCSharedMemory -> String -> Socket -> RunningJob -> IO ()
+takeRoShmemBlobs roShmem tidStr conn job = do
+  strs <- SharedMemory.getShmemStrings roShmem
+  forM_ strs $ \str -> do
+    msg <- Protocol.parseMsg str
+    handleJobMsg Nothing tidStr conn job msg
+
 handleJobConnection :: SharedMemory -> String -> Socket -> RunningJob -> Need -> IO ()
 handleJobConnection shmem tidStr conn job _need = do
   -- This lets us know for sure that by the time the slave dies,
@@ -304,13 +318,19 @@ handleJobConnection shmem tidStr conn job _need = do
   connId <- Fresh.next $ jobFreshConnIds job
   tid <- myThreadId
 
-  SharedMemory.sharedMemorySendFD shmem (fdSocket conn)
-  
+  let connFd = fdSocket conn
+  SharedMemory.sharedMemorySendFD shmem connFd
+  threadWaitRead (Fd connFd)
+  roShmem <- SharedMemory.recvReadonlySharedMemory connFd
+
   connFinishedMVar <- newEmptyMVar
   (`finally` putMVar connFinishedMVar ()) $
     withRegistered (jobActiveConnections job) connId (tid, readMVar connFinishedMVar) $ do
       sendGo conn
-      recvLoop_ (handleJobMsg tidStr conn job <=< Protocol.parseMsg) conn
+      recvLoop_ (handleJobMsg (Just roShmem) tidStr conn job <=< Protocol.parseMsg) conn
+
+  takeRoShmemBlobs roShmem tidStr conn job
+
 
 mkEnvVars :: FSHook -> FilePath -> JobId -> Process.Env
 mkEnvVars fsHook rootFilter jobId =

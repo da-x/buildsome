@@ -16,9 +16,10 @@
 static __thread struct {
     pid_t pid;                  /* TODO: Document that this identifies fork()ed threads */
     int connection_fd;
-    shmem_context *shmem_context;
+    shmem_context *common_shmem_context;
+    shmem_context *local_shmem_context;
     enum need need;
-} thread_state = {-1, -1, NULL, -1};
+} thread_state = {-1, -1, NULL, NULL, -1};
 
 static int gettid(void)
 {
@@ -80,18 +81,43 @@ static int connect_master(const char *need_str)
     return fd;
 }
 
+static bool await_go_on_fd(int fd)
+{
+    char buf[2];
+    uint32_t got = 0;
+    while (got < sizeof(buf)) {
+        ssize_t rc = recv(fd, &buf[got], sizeof(buf) - got, 0);
+        if (rc == 0) break;
+        if (rc == -1 && errno == EINTR) continue;
+        ASSERT(rc > 0);
+        got += (uint32_t)rc;
+    }
+
+    shmem_reset_blobs(thread_state.local_shmem_context);
+
+    return !memcmp("GO", PS(buf));
+}
+
 int client_make_connection(enum need need)
 {
     pid_t pid = getpid();
+
     if(pid != thread_state.pid) {
+        thread_state.connection_fd = -1; /* There was fork or exec */
         thread_state.pid = pid;
-        thread_state.connection_fd = -1;
+
         int fd = connect_master(need == HOOK ? "HOOK" : "HINT");
         if(-1 == fd) return -1;
-        thread_state.shmem_context = recv_readonly_shmem(fd);
-        thread_state.connection_fd = fd;
+
+        thread_state.common_shmem_context = recv_readonly_shmem(fd);
         thread_state.need = need;
-        if(!await_go()) return -1;
+
+        thread_state.local_shmem_context = new_shmem();
+        shmem_send_fd(thread_state.local_shmem_context, fd);
+
+        if(!await_go_on_fd(fd)) return -1;
+
+        thread_state.connection_fd = fd;
     }
     ASSERT(thread_state.need == need);
     return thread_state.connection_fd;
@@ -99,10 +125,10 @@ int client_make_connection(enum need need)
 
 bool is_wait_needed(const char *filename)
 {
-    if (!thread_state.shmem_context) {
+    if (!thread_state.common_shmem_context) {
         return true;
     }
-    return !shmem_get_item_non_deterministic(thread_state.shmem_context,
+    return !shmem_get_item_non_deterministic(thread_state.common_shmem_context,
         filename);
 }
 
@@ -119,16 +145,7 @@ static int assert_connection(void)
 
 bool await_go(void)
 {
-    char buf[2];
-    uint32_t got = 0;
-    while (got < sizeof(buf)) {
-        ssize_t rc = recv(assert_connection(), &buf[got], sizeof(buf) - got, 0);
-        if (rc == 0) break;
-        if (rc == -1 && errno == EINTR) continue;
-        ASSERT(rc > 0);
-        got += (uint32_t)rc;
-    }
-    return !memcmp("GO", PS(buf));
+    return await_go_on_fd(assert_connection());
 }
 
 bool client__send_hooked(bool is_delayed, const char *buf, size_t size,
@@ -139,6 +156,12 @@ bool client__send_hooked(bool is_delayed, const char *buf, size_t size,
 
     if (truncatable_end) {
         size = (truncatable_end + strlen(truncatable_end) + 1) - buf;
+    }
+
+    if (!is_delayed && thread_state.local_shmem_context) {
+        shmem_add_blob(thread_state.local_shmem_context,
+                       buf, size);
+        return true;
     }
 
     if(!send_size(fd, sizeof(is_delayed)+size)) return false;

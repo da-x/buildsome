@@ -12,6 +12,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/un.h>
+#include <limits.h>
 
 #include "shared.h"
 #include "sha1.h"
@@ -53,6 +56,7 @@ typedef struct _shmem_header {
     size_t table_order;
     size_t table_end;
     size_t items_used;
+    size_t first_blob_offset;
     size_t next_blob_offset;
     size_t mappable_size;
 } shmem_header;
@@ -173,6 +177,42 @@ size_t shmem_add_string(shmem_context *shmem_ctx, const char *str, size_t len)
     LOG("added string \"%s\" at offset 0x%lx", str, offset);
 
     return offset;
+}
+
+struct shmem_blob {
+    int size;
+    int data_len;
+    char data[];
+};
+
+void shmem_add_blob(shmem_context *shmem_ctx, const char *blob, size_t len)
+{
+    shmem_header *header = ((shmem_header *)shmem_ctx->root);
+    size_t offset = header->next_blob_offset;
+    size_t data_size = (len + sizeof(bool) + 1 + 3) & ~3;
+    size_t n = data_size + sizeof(struct shmem_blob);
+    assert(n <= INT_MAX - sizeof(int));
+
+    if (n + offset > shmem_ctx->size) {
+        shmem_ctx->size = n + offset + 0x10000;
+        shmem_resize(shmem_ctx);
+
+        header = ((shmem_header *)shmem_ctx->root);
+    }
+
+    header->next_blob_offset = n + offset;
+
+    struct shmem_blob *hdr = shmem_ctx->root + offset;
+    hdr->size = n;
+    hdr->data_len = len + 1;
+    hdr->data[0] = '\0';
+    memcpy(&hdr->data[1], blob, len);
+}
+
+void shmem_reset_blobs(shmem_context *shmem_ctx)
+{
+    shmem_header *header = ((shmem_header *)shmem_ctx->root);
+    header->next_blob_offset = header->first_blob_offset;
 }
 
 static key_hash *shmem_get_item_by_idx(shmem_context *shmem_ctx, uint64_t offset, shmem_header *header)
@@ -353,12 +393,21 @@ key_hash *shmem_add_item(shmem_context *shmem_ctx, const char *str)
     return shmem_add_item_bs(shmem_ctx, str, strlen(str));
 }
 
+static int gettid(void)
+{
+    #ifdef __APPLE__
+        return pthread_mach_thread_np(pthread_self());
+    #else
+        return syscall(__NR_gettid);
+    #endif
+}
+
 shmem_context *new_shmem(void)
 {
     char filename[0x100];
 
     snprintf(filename, sizeof(filename),
-             "buildsome.main-shmem.%d", getpid());
+             "buildsome.main-shmem.%d.%d", getpid(), gettid());
 
     const int fd = shm_open(filename, O_CREAT | O_RDWR | O_CLOEXEC, 0664);
     assert(fd != -1);
@@ -381,6 +430,7 @@ shmem_context *new_shmem(void)
     header->table_order = INITIAL_TABLE_ORDER;
     header->table_start = sizeof(*header);
     shmem_init_table_end(shmem_ctx, header);
+    header->first_blob_offset = header->next_blob_offset;
 
     shmem_resize(shmem_ctx);
 
@@ -446,9 +496,11 @@ shmem_context *recv_readonly_shmem(int source_fd)
     hdr.msg_iovlen = 1;
 
     int ret = recvmsg(source_fd, &hdr, 0);
-    assert(ret >= 0);
+    assert(ret == 1);
 
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&hdr);
+    assert(dummy == '*');
+    assert(cmsg != NULL);
 
     int ro_fd;
     memcpy(&ro_fd, CMSG_DATA(cmsg), sizeof(int));
@@ -478,4 +530,60 @@ shmem_context *new_readonly_shmem(int ro_fd)
     shmem_remap(shmem_ctx);
 
     return shmem_ctx;
+}
+
+void free_shmem(shmem_context *shmem_ctx)
+{
+    if (shmem_ctx->mapped_size) {
+        munmap(shmem_ctx->root, shmem_ctx->mapped_size);
+    }
+    if (shmem_ctx->ro_fd != -1) {
+        close(shmem_ctx->ro_fd);
+    }
+    free(shmem_ctx);
+}
+
+struct _shmem_blob_iter {
+    size_t offset;
+    shmem_context *ctx;
+    shmem_header *header;
+};
+
+shmem_blob_iter *shmem_blob_iterate_init(shmem_context *shmem_ctx)
+{
+    __sync_synchronize();
+
+    shmem_header *header = ((shmem_header *)shmem_ctx->root);
+
+    shmem_ctx->size = header->mappable_size;
+    shmem_remap(shmem_ctx);
+
+    header = ((shmem_header *)shmem_ctx->root);
+
+    shmem_blob_iter *iter = calloc(sizeof(*iter), 0);
+    assert(iter != NULL);
+    iter->header = header;
+    iter->offset = header->first_blob_offset;
+    iter->ctx = shmem_ctx;
+
+    return iter;
+}
+
+int shmem_blob_iterate_next(shmem_blob_iter *iter, char **ptr, int *size)
+{
+    if (iter->offset >= iter->header->next_blob_offset) {
+        free(iter);
+        return -1;
+    }
+
+    struct shmem_blob *blob = iter->ctx->root + iter->offset;
+    assert(blob->size != 0);
+    assert(blob->data_len <= blob->size);
+
+    *ptr = blob->data;
+    *size = blob->data_len;
+
+    iter->offset += blob->size;
+
+    return 0;
 }
